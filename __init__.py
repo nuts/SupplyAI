@@ -1,1 +1,0 @@
-# SupplyAI utils
