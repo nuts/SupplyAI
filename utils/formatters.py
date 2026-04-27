@@ -1,6 +1,6 @@
 """
 formatters.py
-Display helpers: number formatting, colour coding, tag rendering.
+Display helpers, colour coding, and HTML table generation for dense data views.
 """
 
 import pandas as pd
@@ -8,147 +8,124 @@ import numpy as np
 
 
 # ── Number formatters ──────────────────────────────────────────────────────────
-def fmt_units(n) -> str:
-    if pd.isna(n):
-        return "—"
+def fmt_units(n):
+    if pd.isna(n) or n is None: return "—"
     return f"{int(round(n)):,}"
 
 
-def fmt_lbs(n) -> str:
-    if pd.isna(n):
-        return "—"
-    return f"{round(float(n), 1):,.1f} lbs"
+def fmt_lbs(n):
+    if pd.isna(n) or n is None: return "—"
+    return f"{round(float(n), 0):,.0f} lbs"
 
 
-def fmt_pct(n, decimals=1) -> str:
-    if pd.isna(n):
-        return "—"
+def fmt_pct(n, decimals=1):
+    if pd.isna(n) or n is None: return "—"
     return f"{round(float(n) * 100, decimals):+.{decimals}f}%"
 
 
-def fmt_currency(n) -> str:
-    if pd.isna(n):
-        return "—"
-    return f"${float(n):,.2f}"
+def fmt_currency(n):
+    if pd.isna(n) or n is None: return "—"
+    return f"${float(n):,.0f}"
 
 
-def fmt_weeks(n) -> str:
-    if pd.isna(n) or n == 99:
-        return "∞"
-    if n >= 100:
-        return "∞"
-    return f"{round(float(n), 1):.1f} wks"
+def fmt_weeks(n):
+    if pd.isna(n) or n is None or n >= 99: return "∞"
+    return f"{round(float(n), 1):.1f}wk"
 
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
-def coverage_colour(weeks: float) -> str:
-    """Return hex colour for inventory coverage weeks."""
-    if weeks >= 8:
-        return "#b8f542"   # green
-    elif weeks >= 4:
-        return "#f5a842"   # amber
-    else:
-        return "#f54242"   # red
+def coverage_colour(weeks):
+    if pd.isna(weeks): return "#6b7a6b"
+    if weeks >= 8:  return "#b8f542"
+    if weeks >= 4:  return "#f5a842"
+    return "#f54242"
 
 
-def trend_colour(yoy: float) -> str:
-    if yoy > 0.05:
-        return "#b8f542"
-    elif yoy < -0.05:
-        return "#f54242"
+def trend_colour(yoy):
+    if pd.isna(yoy):       return "#6b7a6b"
+    if yoy > 0.05:         return "#b8f542"
+    if yoy < -0.05:        return "#f54242"
     return "#6b7a6b"
 
 
-def confidence_colour(conf: str) -> str:
-    return {"High": "#b8f542", "Medium": "#f5a842", "Low": "#f54242"}.get(conf, "#6b7a6b")
+# ── Tag pill HTML ──────────────────────────────────────────────────────────────
+def tag_pill(text, colour="#6b7a6b", bg=None):
+    if bg is None:
+        bg = colour + "22"   # 13% alpha
+    return (f"<span style='background:{bg};color:{colour};"
+            f"border-radius:4px;padding:2px 7px;font-size:10px;"
+            f"font-weight:500;display:inline-block'>{text}</span>")
 
 
-def cv_label(cv: float) -> tuple[str, str]:
-    """Return (label, colour) for coefficient of variation."""
-    if cv < 0.3:
-        return "Stable",   "#b8f542"
-    elif cv < 0.6:
-        return "Moderate", "#f5a842"
-    else:
-        return "Volatile", "#f54242"
+def confidence_tag(conf):
+    colours = {"High": "#b8f542", "Medium": "#f5a842", "Low": "#f54242", "New": "#42b8f5"}
+    return tag_pill(conf, colours.get(conf, "#6b7a6b"))
 
 
-# ── Streamlit metric delta helpers ────────────────────────────────────────────
-def delta_str(yoy: float) -> str:
+def status_tag(status):
+    colours = {
+        "Out of Stock":    "#f54242",
+        "Critical":        "#f54242",
+        "Below Reorder":   "#f5a842",
+        "Low":             "#f5a842",
+        "Adequate":        "#b8f542",
+        "Healthy":         "#42f5a8",
+    }
+    return tag_pill(status, colours.get(status, "#6b7a6b"))
+
+
+def trend_tag(yoy):
+    if yoy is None or (isinstance(yoy, str) and yoy.lower() == "new"):
+        return tag_pill("NEW", "#42b8f5")
+    if pd.isna(yoy): return tag_pill("—", "#6b7a6b")
+
     pct = round(yoy * 100, 1)
-    sign = "+" if pct >= 0 else ""
-    return f"{sign}{pct}% YoY"
+    if pct > 5:  return f"<span style='color:#b8f542;font-weight:500'>▲ {pct}%</span>"
+    if pct < -5: return f"<span style='color:#f54242;font-weight:500'>▼ {abs(pct)}%</span>"
+    return f"<span style='color:#6b7a6b'>— {pct:+.1f}%</span>"
 
 
-# ── Dataframe styling ─────────────────────────────────────────────────────────
-def style_coverage(val):
-    try:
-        v = float(str(val).replace(" wks", "").replace("∞", "999"))
-    except Exception:
-        return ""
-    if v >= 8:
-        return "color: #b8f542"
-    elif v >= 4:
-        return "color: #f5a842"
-    else:
-        return "color: #f54242; font-weight: 600"
+# ── Mini bar HTML ──────────────────────────────────────────────────────────────
+def mini_bar(value, max_value, colour="#b8f542", width=60):
+    if max_value <= 0 or pd.isna(value): return ""
+    pct = min(100, round(float(value) / max_value * 100))
+    return (f"<div style='width:{width}px;background:#1a1d1a;border-radius:2px;"
+            f"height:3px;margin-top:3px'>"
+            f"<div style='width:{pct}%;background:{colour};height:3px;border-radius:2px;opacity:.6'></div>"
+            f"</div>")
 
 
-def style_trend(val):
-    try:
-        v = float(str(val).replace("%", "").replace("+", ""))
-    except Exception:
-        return ""
-    if v > 5:
-        return "color: #b8f542"
-    elif v < -5:
-        return "color: #f54242"
-    return "color: #6b7a6b"
-
-
-# ── Week label builder ─────────────────────────────────────────────────────────
-def week_labels(current_week: int, current_year: int, n: int = 8) -> list[str]:
-    """Generate list of 'YYYY-WW' strings starting from current_week."""
-    labels = []
-    w, y = current_week, current_year
-    for _ in range(n):
-        labels.append(f"{y}-{w:02d}")
-        w += 1
-        if w > 52:
-            w = 1
-            y += 1
-    return labels
-
-
-def week_display_labels(current_week: int, current_year: int, n: int = 8) -> list[str]:
-    """Human-readable 'W15' style labels."""
-    return [f"W{((current_week - 1 + i) % 52) + 1}" for i in range(n)]
-
-
-# ── Allergen badge HTML ───────────────────────────────────────────────────────
+# ── Allergen badges ────────────────────────────────────────────────────────────
 ALLERGEN_COLOURS = {
-    "Peanut":    "#f54242",
-    "Tree Nut":  "#f5a842",
-    "Wheat":     "#f5d442",
-    "Milk":      "#42b8f5",
-    "Soy":       "#a842f5",
-    "Sesame":    "#f542b8",
-    "Sulfites":  "#6b7a6b",
-    "Shellfish": "#42f5e8",
-    "Fish":      "#42f599",
+    "Peanut":    "#f54242",  "Tree Nut":  "#f5a842",  "Wheat":     "#f5d442",
+    "Milk":      "#42b8f5",  "Soy":       "#a842f5",  "Sesame":    "#f542b8",
+    "Sulfites":  "#6b7a6b",  "Shellfish": "#42f5e8",  "Fish":      "#42f599",
     "Egg":       "#f5f542",
 }
 
 
-def allergen_badges(allergens: list[str]) -> str:
+def allergen_badges(allergens):
     if not allergens:
-        return "<span style='color:#6b7a6b;font-size:11px'>None</span>"
-    badges = []
-    for a in allergens:
-        col = ALLERGEN_COLOURS.get(a, "#6b7a6b")
-        badges.append(
-            f"<span style='background:rgba(0,0,0,0.3);border:1px solid {col};"
-            f"color:{col};border-radius:3px;padding:1px 6px;font-size:10px;"
-            f"margin-right:3px'>{a}</span>"
-        )
-    return "".join(badges)
+        return "<span style='color:#3a3e3a;font-size:10px'>—</span>"
+    return "".join(
+        f"<span style='border:1px solid {ALLERGEN_COLOURS.get(a, '#6b7a6b')};"
+        f"color:{ALLERGEN_COLOURS.get(a, '#6b7a6b')};border-radius:3px;"
+        f"padding:1px 5px;font-size:9px;margin-right:2px'>{a[:3].upper()}</span>"
+        for a in allergens
+    )
+
+
+# ── Week label builders ────────────────────────────────────────────────────────
+def week_keys(current_week, current_year, n=8):
+    """List of YYYY-WW strings."""
+    out = []
+    w, y = current_week, current_year
+    for _ in range(n):
+        out.append(f"{y}-{w:02d}")
+        w += 1
+        if w > 52: w, y = 1, y + 1
+    return out
+
+
+def week_short_labels(current_week, n=8):
+    return [f"W{((current_week - 1 + i) % 52) + 1}" for i in range(n)]
