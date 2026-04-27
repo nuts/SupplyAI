@@ -1,12 +1,27 @@
+# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.env
-venv/
+*$py.class
+*.so
+.Python
 .venv/
-*.csv
-*.xlsx
-*.xls
-!data/.gitkeep
+venv/
+env/
+
+# Cached uploads & runtime data
+cache/*
+!cache/.gitkeep
+snapshots/*
+!snapshots/.gitkeep
+scenarios/*
+!scenarios/.gitkeep
+
+# OS / IDE
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Streamlit
 .streamlit/secrets.toml
