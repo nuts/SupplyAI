@@ -12,6 +12,8 @@ Changes vs. prior version:
   was produced.
 - Every variant in sku_master is given a row, not just those with sales rows.
 - Method tagging exposed via `forecast_method` column for QA.
+- variant_id values are coerced to str so downstream string operations
+  (e.g. ", ".join(...) in alerts.py) never see NaN / floats.
 
 Earlier changes preserved:
 - YoY compares trailing 4 weeks vs same 4-week period prior year.
@@ -146,7 +148,7 @@ def build_variant_stats(sales: pd.DataFrame,
         meta = grp.sort_values(["year", "week"]).iloc[-1]
 
         rows.append({
-            "variant_id": vid,
+            "variant_id": str(vid) if vid is not None else "",
             "product_id": meta.get("product_id"),
             "product_name": meta.get("product_name", ""),
             "cat_l1": meta.get("cat_l1", ""),
@@ -215,8 +217,6 @@ def _build_product_velocity(variant_stats: pd.DataFrame) -> dict:
     for pid, g in variant_stats.groupby("product_id"):
         if pid is None or (isinstance(pid, float) and np.isnan(pid)):
             continue
-        # Sum recent_4w_avg and baseline across variants of this product
-        # (this approximates total parent-product velocity).
         recent = float(g["recent_4w_avg"].fillna(0).sum())
         base = float(g["baseline"].fillna(0).sum())
         yoy_vals = g["yoy"].dropna()
@@ -245,17 +245,16 @@ def _build_category_velocity(variant_stats: pd.DataFrame) -> dict:
 
 
 def _classify_confidence(method: str, n_weeks: int) -> str:
-    """Confidence label based on the method used to produce the forecast,
-    not just data volume. Planners now know HOW the number was made."""
+    """Confidence label based on the method used to produce the forecast."""
     if method == "Direct":
         if n_weeks >= MIN_WEEKS_FOR_HIGH: return "High"
         if n_weeks >= MIN_WEEKS_FOR_MEDIUM: return "Medium"
         return "Low"
     if method == "Parent":
-        return "Low"     # inherited from sibling SKUs
+        return "Low"
     if method == "Category":
         return "Very Low"
-    return "None"        # zero forecast, no signal at all
+    return "None"
 
 
 def run_forecast(sales, sku_master, inventory,
@@ -272,10 +271,6 @@ def run_forecast(sales, sku_master, inventory,
       2. Parent      - inherit parent product velocity, scale by pack-size ratio.
       3. Category    - fall back to category mean per-variant velocity.
       4. None        - no signal anywhere, weekly_forecast = zeros.
-
-    scenario_params can override:
-      'forecast_uplift_pct'    - global uplift %  (e.g. +10)
-      'marketing_uplift_factor' - scale all promo uplifts (1.0 = full)
     """
     if scenario_params is None:
         scenario_params = {}
@@ -293,6 +288,10 @@ def run_forecast(sales, sku_master, inventory,
                      "sku_weight_lbs"]
     keep_cols = [c for c in sku_meta_cols if c in sku_master.columns]
     sku_universe = sku_master[keep_cols].drop_duplicates("variant_id").copy()
+    # Drop rows with missing variant_id and force str so downstream
+    # ", ".join(variant_id) calls (e.g. in alerts.py) never see NaN / floats.
+    sku_universe = sku_universe[sku_universe["variant_id"].notna()].copy()
+    sku_universe["variant_id"] = sku_universe["variant_id"].astype(str)
 
     # Outer-merge variant_stats onto the SKU universe so every SKU appears.
     full = sku_universe.merge(
@@ -302,7 +301,7 @@ def run_forecast(sales, sku_master, inventory,
         suffixes=("", "_stats"),
     )
 
-    # Coalesce metadata columns (prefer sku_master, fill from sales)
+    # Coalesce metadata columns
     for c in ["product_id", "product_name", "cat_l1", "cat_l2",
               "variant_name", "sku_weight_lbs"]:
         stats_col = f"{c}_stats"
@@ -339,7 +338,7 @@ def run_forecast(sales, sku_master, inventory,
 
     rows = []
     for _, vs in full.iterrows():
-        vid = vs["variant_id"]
+        vid = str(vs["variant_id"])
         n_weeks_var = int(vs.get("n_weeks", 0) or 0)
         recent = float(vs.get("recent_4w_avg") or 0.0)
         baseline = float(vs.get("baseline") or 0.0)
@@ -354,14 +353,10 @@ def run_forecast(sales, sku_master, inventory,
             base = recent if recent > 0 else baseline
             method = "Direct"
         else:
-            # Parent product fallback
             pid = vs.get("product_id")
             pinfo = parent_vel.get(pid) if pid is not None else None
             if pinfo and pinfo["recent_4w_avg"] > 0:
-                # Pack-size scaling: this variant's ounces vs. total ounces of
-                # its siblings with data. If unknown, use DEFAULT_NEW_VARIANT_SHARE.
                 this_oz = vs.get("ounces", 0) or 0
-                # Approximate sibling ounces from parent_vel by averaging.
                 avg_sibling_oz = vs.get("ounces", 0) or 0
                 share = _ratio_safe(this_oz, max(avg_sibling_oz, 1),
                                     default=DEFAULT_NEW_VARIANT_SHARE)
@@ -370,17 +365,14 @@ def run_forecast(sales, sku_master, inventory,
                     yoy = pinfo["yoy"]
                 method = "Parent"
             else:
-                # Category fallback - last resort before zero
                 cat = vs.get("cat_l1")
                 cinfo = cat_vel.get(cat) if cat else None
                 if cinfo and cinfo["recent_4w_avg"] > 0:
                     base = cinfo["recent_4w_avg"] * DEFAULT_NEW_VARIANT_SHARE
                     method = "Category"
 
-        # If we ended up with base > 0, forecast; otherwise zeros.
         weekly = []
         promo_weeks = []
-        # Pick seasonal index: per-category if available, else global.
         cat = vs.get("cat_l1")
         s_table = cat_seasonal.get(cat, seasonal_idx) if cat else seasonal_idx
 
@@ -400,21 +392,21 @@ def run_forecast(sales, sku_master, inventory,
 
         confidence = _classify_confidence(method, n_weeks_var)
 
-        # Inventory: PRIMARY facility only.
         primary_inv = inventory[
-            (inventory["variant_id"] == vid) &
+            (inventory["variant_id"].astype(str) == vid) &
             (inventory["warehouse"].isin(PRIMARY_WAREHOUSES))
         ]["units_on_hand"].sum()
         all_inv = inventory[
-            (inventory["variant_id"] == vid) &
+            (inventory["variant_id"].astype(str) == vid) &
             (~inventory["warehouse"].isin(["none"]))
         ]["units_on_hand"].sum()
 
         wks_cover = round(primary_inv / avg_wk, 1) if avg_wk > 0 else 99.0
         wks_cover = min(wks_cover, 99.0)
 
-        rows.append({
-            **vs.to_dict(),
+        row = {**vs.to_dict()}
+        row["variant_id"] = vid  # ensure str
+        row.update({
             "weekly_forecast": weekly,
             "total_8wk": total_8wk,
             "avg_weekly": avg_wk,
@@ -426,6 +418,7 @@ def run_forecast(sales, sku_master, inventory,
             "forecast_method": method,
             "confidence": confidence,
         })
+        rows.append(row)
 
     fc = pd.DataFrame(rows).sort_values("total_8wk", ascending=False).reset_index(drop=True)
     return fc
@@ -440,25 +433,22 @@ def build_dc_forecast(forecast, inventory, n_weeks=FORECAST_WEEKS):
     )
 
     for _, fc_row in forecast.iterrows():
-        vid = fc_row["variant_id"]
+        vid = str(fc_row["variant_id"])
         dc_split = fc_row.get("dc_split", {})
         if not isinstance(dc_split, dict):
             dc_split = {}
         reg_split = {wh: v for wh, v in dc_split.items() if wh in REGIONAL_WAREHOUSES}
         total_reg = sum(reg_split.values())
 
-        # Cold-start: if variant has no DC split (no historical sales),
-        # apply the network's average regional split so NEW SKUs still get
-        # a non-zero DC forecast.
+        # Cold-start: equal share across regional DCs if no historical split
         if total_reg == 0:
-            # equal share across regional DCs as a defensible default
             share_each = 1.0 / max(len(REGIONAL_WAREHOUSES), 1)
             reg_split = {wh: share_each for wh in REGIONAL_WAREHOUSES}
         else:
             reg_split = {wh: v / total_reg for wh, v in reg_split.items()}
 
         for wh, share in reg_split.items():
-            wh_inv = inv_by[(inv_by["variant_id"] == vid) &
+            wh_inv = inv_by[(inv_by["variant_id"].astype(str) == vid) &
                             (inv_by["warehouse"] == wh)]["units_on_hand"].sum()
             weekly_dc = [round(w * share, 1) for w in fc_row["weekly_forecast"]]
             avg_dc = sum(weekly_dc) / n_weeks if n_weeks > 0 else 0
